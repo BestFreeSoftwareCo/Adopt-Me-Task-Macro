@@ -77,9 +77,9 @@ class App(ctk.CTk):
                 start_stop=self._state.settings.start_stop_hotkey,
                 pause_resume=self._state.settings.pause_resume_hotkey,
             ),
-            on_start_stop=lambda: self._post_ui(lambda: self._runner.toggle_start_stop()),
-            on_pause_resume=lambda: self._post_ui(lambda: self._runner.toggle_pause_resume()),
-            on_emergency_stop=lambda: self._post_ui(self._emergency_stop),
+            on_start_stop=self._on_hotkey_start_stop,
+            on_pause_resume=self._on_hotkey_pause_resume,
+            on_emergency_stop=self._on_hotkey_emergency_stop,
         )
         try:
             self._hotkeys.start()
@@ -904,6 +904,47 @@ class App(ctk.CTk):
         if self._closing:
             return
         self._ui_queue.put(fn)
+
+    def _on_hotkey_start_stop(self) -> None:
+        try:
+            try:
+                self._logger.info("Hotkey: start/stop")
+            except Exception:
+                pass
+            self._runner.toggle_start_stop()
+        except Exception:
+            try:
+                self._logger.exception("Hotkey start/stop handler failed")
+            except Exception:
+                pass
+        self._post_ui(lambda: self._set_message("Hotkey: Start/Stop", timeout_ms=1200))
+
+    def _on_hotkey_pause_resume(self) -> None:
+        try:
+            try:
+                self._logger.info("Hotkey: pause/resume")
+            except Exception:
+                pass
+            self._runner.toggle_pause_resume()
+        except Exception:
+            try:
+                self._logger.exception("Hotkey pause/resume handler failed")
+            except Exception:
+                pass
+        self._post_ui(lambda: self._set_message("Hotkey: Pause/Resume", timeout_ms=1200))
+
+    def _on_hotkey_emergency_stop(self) -> None:
+        try:
+            try:
+                self._logger.warning("Hotkey: emergency stop")
+            except Exception:
+                pass
+            self._post_ui(self._emergency_stop)
+        except Exception:
+            try:
+                self._logger.exception("Hotkey emergency stop handler failed")
+            except Exception:
+                pass
 
     def _drain_ui_queue(self) -> None:
         if self._closing:
