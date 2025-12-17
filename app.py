@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import os
 import queue
 import threading
@@ -25,6 +26,7 @@ from adoptme_macro.win_focus import is_foreground_process
 
 TOS_VERSION = 1
 DISCORD_INVITE_URL = "https://discord.com/invite/498tyUUaBw"
+ACCESS_KEY_SHA256 = "017787675c118bb908c3e4b8bf44ecb26e42beddc5ad2d153ed38c289534d3a2"
 
 
 class App(ctk.CTk):
@@ -38,6 +40,13 @@ class App(ctk.CTk):
         self._state: AppState = storage.load_config()
         ctk.set_appearance_mode(self._state.settings.theme)
         ctk.set_default_color_theme("blue")
+
+        try:
+            s = self._state.settings
+            accepted = int(getattr(s, "tos_accepted_version", 0) or 0)
+            self._startup_gate_needed = accepted < TOS_VERSION or not bool(getattr(s, "access_key_accepted", False))
+        except Exception:
+            self._startup_gate_needed = True
 
         self._ttk_style = ttk.Style(self)
         self._apply_ttk_theme()
@@ -81,22 +90,19 @@ class App(ctk.CTk):
             on_pause_resume=self._on_hotkey_pause_resume,
             on_emergency_stop=self._on_hotkey_emergency_stop,
         )
-        try:
-            self._hotkeys.start()
-        except Exception as e:
-            try:
-                self._logger.exception("Failed to start hotkeys")
-            except Exception:
-                pass
-            self._hotkeys_failed = True
-        else:
-            self._hotkeys_failed = False
+        self._hotkeys_active = False
+        self._hotkeys_failed = False
+        if not self._startup_gate_needed:
+            self._try_start_hotkeys()
 
         self._build_ui()
         self._apply_ttk_theme()
         self._sync_ui_from_state()
         self._refresh_dots_table()
         self._update_status(RunnerStatus(state="STOPPED"))
+
+        if self._startup_gate_needed:
+            self._set_controls_enabled(False)
 
         self.protocol("WM_DELETE_WINDOW", self._on_close)
 
@@ -124,6 +130,33 @@ class App(ctk.CTk):
                 storage.save_config(self._state)
             except Exception:
                 pass
+
+        if not bool(getattr(s, "access_key_accepted", False)):
+            ok = self._show_access_key_modal()
+            if not ok:
+                try:
+                    self.after(10, self._on_close)
+                except Exception:
+                    pass
+                return
+
+            try:
+                s.access_key_accepted = True
+                s.discord_prompt_shown = True
+                storage.save_config(self._state)
+            except Exception:
+                pass
+
+        try:
+            accepted_now = int(getattr(s, "tos_accepted_version", 0) or 0)
+            gate_now = accepted_now < TOS_VERSION or not bool(getattr(s, "access_key_accepted", False))
+        except Exception:
+            gate_now = True
+
+        self._startup_gate_needed = bool(gate_now)
+        if not self._startup_gate_needed:
+            self._set_controls_enabled(True)
+            self._try_start_hotkeys()
 
         shown = bool(getattr(s, "discord_prompt_shown", False))
         if not shown:
@@ -190,6 +223,93 @@ class App(ctk.CTk):
             side="left"
         )
         ctk.CTkButton(btns, text="I Agree", command=accept).pack(side="right")
+
+        try:
+            self.wait_window(win)
+        except Exception:
+            return False
+
+        return bool(decision["ok"])
+
+    def _show_access_key_modal(self) -> bool:
+        if self._closing:
+            return False
+
+        win = ctk.CTkToplevel(self)
+        win.title("Access Key Required")
+        win.geometry("560x320")
+        win.resizable(False, False)
+        try:
+            win.transient(self)
+            win.grab_set()
+        except Exception:
+            pass
+
+        decision = {"ok": False}
+
+        def decline() -> None:
+            decision["ok"] = False
+            try:
+                win.destroy()
+            except Exception:
+                pass
+
+        def join_discord() -> None:
+            try:
+                webbrowser.open(DISCORD_INVITE_URL)
+            except Exception:
+                pass
+
+        key_var = tk.StringVar(value="")
+        err_var = tk.StringVar(value="")
+
+        def submit() -> None:
+            raw = (key_var.get() or "").strip()
+            digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()
+            if digest == ACCESS_KEY_SHA256:
+                decision["ok"] = True
+                try:
+                    win.destroy()
+                except Exception:
+                    pass
+                return
+            err_var.set("Invalid key. Please join the Discord and try again.")
+
+        try:
+            win.protocol("WM_DELETE_WINDOW", decline)
+        except Exception:
+            pass
+
+        ctk.CTkLabel(win, text="Access Key Required", font=ctk.CTkFont(size=18, weight="bold")).pack(
+            anchor="w", padx=18, pady=(18, 8)
+        )
+        ctk.CTkLabel(
+            win,
+            text="To use this macro, you need an access key.\nYou must join the Discord server to get the key.",
+            justify="left",
+        ).pack(anchor="w", padx=18, pady=(0, 10))
+
+        ctk.CTkButton(win, text="Join Discord Server", command=join_discord).pack(anchor="w", padx=18, pady=(0, 8))
+        ctk.CTkLabel(win, text=DISCORD_INVITE_URL).pack(anchor="w", padx=18, pady=(0, 14))
+
+        ctk.CTkLabel(win, text="Paste your key below:").pack(anchor="w", padx=18)
+        entry = ctk.CTkEntry(win, textvariable=key_var, width=520, placeholder_text="Paste key here")
+        entry.pack(anchor="w", padx=18, pady=(6, 6))
+
+        err_lbl = ctk.CTkLabel(win, textvariable=err_var, text_color="#D9534F")
+        err_lbl.pack(anchor="w", padx=18, pady=(0, 10))
+
+        btns = ctk.CTkFrame(win, fg_color="transparent")
+        btns.pack(fill="x", padx=18, pady=(0, 18))
+        ctk.CTkButton(btns, text="Exit", fg_color="#9B2C2C", hover_color="#7A2222", command=decline).pack(
+            side="left"
+        )
+        ctk.CTkButton(btns, text="Submit", command=submit).pack(side="right")
+
+        try:
+            entry.focus_set()
+        except Exception:
+            pass
 
         try:
             self.wait_window(win)
@@ -900,12 +1020,52 @@ class App(ctk.CTk):
         except Exception:
             pass
 
+    def _try_start_hotkeys(self) -> None:
+        if self._closing:
+            return
+        if getattr(self, "_startup_gate_needed", False):
+            return
+        if getattr(self, "_hotkeys_active", False):
+            return
+
+        try:
+            self._hotkeys.start()
+        except Exception:
+            try:
+                self._logger.exception("Failed to start hotkeys")
+            except Exception:
+                pass
+            self._hotkeys_failed = True
+            self._hotkeys_active = False
+            if hasattr(self, "_msg_var"):
+                try:
+                    self._set_message("Hotkeys failed to start. Buttons still work.")
+                except Exception:
+                    pass
+        else:
+            self._hotkeys_failed = False
+            self._hotkeys_active = True
+
+    def _set_controls_enabled(self, enabled: bool) -> None:
+        state = "normal" if enabled else "disabled"
+        for attr in ("_start_btn", "_pause_btn", "_test_btn"):
+            btn = getattr(self, attr, None)
+            if btn is None:
+                continue
+            try:
+                btn.configure(state=state)
+            except Exception:
+                pass
+
     def _post_ui(self, fn: Callable[[], None]) -> None:
         if self._closing:
             return
         self._ui_queue.put(fn)
 
     def _on_hotkey_start_stop(self) -> None:
+        if getattr(self, "_startup_gate_needed", False):
+            self._post_ui(lambda: self._set_message("Please enter an access key to continue", timeout_ms=1800))
+            return
         try:
             try:
                 self._logger.info("Hotkey: start/stop")
@@ -920,6 +1080,9 @@ class App(ctk.CTk):
         self._post_ui(lambda: self._set_message("Hotkey: Start/Stop", timeout_ms=1200))
 
     def _on_hotkey_pause_resume(self) -> None:
+        if getattr(self, "_startup_gate_needed", False):
+            self._post_ui(lambda: self._set_message("Please enter an access key to continue", timeout_ms=1800))
+            return
         try:
             try:
                 self._logger.info("Hotkey: pause/resume")
@@ -1475,7 +1638,15 @@ class App(ctk.CTk):
         name = self._profile_name.get().strip()
         if not name:
             return
-        storage.save_profile(name, self._state)
+        try:
+            storage.save_profile(name, self._state)
+        except Exception:
+            try:
+                self._logger.exception("Failed to save profile")
+            except Exception:
+                pass
+            self._set_message("Failed to save profile")
+            return
         self._refresh_profiles()
 
     def _selected_profile(self) -> str | None:
@@ -1488,23 +1659,54 @@ class App(ctk.CTk):
         name = self._selected_profile()
         if not name:
             return
-        st = storage.load_profile(name)
+        try:
+            st = storage.load_profile(name)
+        except Exception:
+            try:
+                self._logger.exception("Failed to load profile")
+            except Exception:
+                pass
+            self._set_message("Failed to load profile (file may be corrupted)")
+            return
         self._apply_loaded_state(st)
 
     def _delete_selected_profile(self) -> None:
         name = self._selected_profile()
         if not name:
             return
-        storage.delete_profile(name)
+        try:
+            storage.delete_profile(name)
+        except Exception:
+            try:
+                self._logger.exception("Failed to delete profile")
+            except Exception:
+                pass
+            self._set_message("Failed to delete profile")
+            return
         self._refresh_profiles()
 
     def _apply_loaded_state(self, st: AppState) -> None:
+        prev = self._state.settings
+        prev_start = str(getattr(prev, "start_stop_hotkey", "f6"))
+        prev_pause = str(getattr(prev, "pause_resume_hotkey", "f7"))
+        prev_tos = int(getattr(prev, "tos_accepted_version", 0) or 0)
+        prev_discord = bool(getattr(prev, "discord_prompt_shown", False))
+        prev_key = bool(getattr(prev, "access_key_accepted", False))
+
         try:
             self._runner.stop()
         except Exception:
             pass
         self._overlay.clear()
         self._state = st
+
+        try:
+            self._state.settings.tos_accepted_version = prev_tos
+            self._state.settings.discord_prompt_shown = prev_discord
+            self._state.settings.access_key_accepted = prev_key
+        except Exception:
+            pass
+
         ctk.set_appearance_mode(self._state.settings.theme)
         self._overlay.set_settings(self._state.settings)
         for idx, d in enumerate(self._state.dots):
@@ -1513,24 +1715,59 @@ class App(ctk.CTk):
 
         self._sync_ui_from_state()
 
-        self._hotkeys.update(
-            HotkeyConfig(
-                start_stop=self._state.settings.start_stop_hotkey,
-                pause_resume=self._state.settings.pause_resume_hotkey,
-            )
-        )
+        new_start = str(self._state.settings.start_stop_hotkey)
+        new_pause = str(self._state.settings.pause_resume_hotkey)
+        try:
+            norm_start = hotkeys_mod._normalize_hotkey(new_start)
+            norm_pause = hotkeys_mod._normalize_hotkey(new_pause)
+            if norm_start == norm_pause:
+                raise ValueError("Start/Stop and Pause/Resume hotkeys must be different")
+            self._hotkeys.update(HotkeyConfig(start_stop=new_start, pause_resume=new_pause))
+            self._hotkeys_failed = False
+            self._hotkeys_active = True
+        except Exception:
+            try:
+                self._logger.exception("Failed to apply hotkeys from profile")
+            except Exception:
+                pass
+
+            try:
+                self._state.settings.start_stop_hotkey = prev_start
+                self._state.settings.pause_resume_hotkey = prev_pause
+            except Exception:
+                pass
+
+            try:
+                self._hotkeys.update(HotkeyConfig(start_stop=prev_start, pause_resume=prev_pause))
+                self._hotkeys_failed = False
+                self._hotkeys_active = True
+            except Exception:
+                self._hotkeys_failed = True
+                self._hotkeys_active = False
+
+            self._sync_ui_from_state()
+            self._set_message("Profile hotkeys invalid; keeping previous hotkeys")
 
         self._rebuild_runner()
 
         self._schedule_autosave()
 
     def _on_start_stop_clicked(self) -> None:
+        if getattr(self, "_startup_gate_needed", False):
+            self._set_message("Please enter an access key to continue")
+            return
         self._runner.toggle_start_stop()
 
     def _on_pause_resume_clicked(self) -> None:
+        if getattr(self, "_startup_gate_needed", False):
+            self._set_message("Please enter an access key to continue")
+            return
         self._runner.toggle_pause_resume()
 
     def _on_test_run_clicked(self) -> None:
+        if getattr(self, "_startup_gate_needed", False):
+            self._set_message("Please enter an access key to continue")
+            return
         if self._runner.status().state != "STOPPED":
             return
         self._runner.start(preview=True)

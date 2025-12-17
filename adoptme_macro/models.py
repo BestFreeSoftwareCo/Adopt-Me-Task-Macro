@@ -78,6 +78,7 @@ class Settings:
 
     tos_accepted_version: int = 0
     discord_prompt_shown: bool = False
+    access_key_accepted: bool = False
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -111,6 +112,7 @@ class Settings:
             "post_action": self.post_action,
             "tos_accepted_version": self.tos_accepted_version,
             "discord_prompt_shown": self.discord_prompt_shown,
+            "access_key_accepted": self.access_key_accepted,
         }
 
     @staticmethod

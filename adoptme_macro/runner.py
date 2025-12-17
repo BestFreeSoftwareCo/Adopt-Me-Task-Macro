@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import random
 import threading
 import time
@@ -37,6 +38,8 @@ class MacroRunner:
         self._on_started = on_started
         self._on_stopped = on_stopped
 
+        self._logger = logging.getLogger("adoptme_macro")
+
         self._lock = threading.Lock()
         self._thread: Optional[threading.Thread] = None
         self._stop = threading.Event()
@@ -68,6 +71,9 @@ class MacroRunner:
         self._on_status(self.status())
 
     def stop(self, join: bool = True) -> None:
+        with self._lock:
+            was_active = self._status.state != "STOPPED"
+
         self._stop.set()
         self._pause.clear()
 
@@ -78,10 +84,15 @@ class MacroRunner:
             except Exception:
                 pass
 
+        alive = t is not None and t.is_alive()
+
         with self._lock:
             self._status = RunnerStatus(state="STOPPED", current_dot_index=0, current_loop=0, paused_reason=None)
+            if not alive:
+                self._thread = None
         self._on_status(self.status())
-        self._on_stopped()
+        if was_active:
+            self._on_stopped()
 
     def pause(self, reason: str = "user") -> None:
         with self._lock:
@@ -188,6 +199,15 @@ class MacroRunner:
 
                     if self._wait_with_pause(max(0, int(settings.loop_delay_ms)) / 1000.0):
                         return
+        except Exception:
+            try:
+                self._logger.exception("Runner crashed")
+            except Exception:
+                pass
+            try:
+                self.stop(join=False)
+            except Exception:
+                pass
         finally:
             return
 
